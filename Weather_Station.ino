@@ -11,7 +11,7 @@
 #include <Wire.h>
 #include "Adafruit_MQTT.h"
 #include "Adafruit_MQTT_Client.h"
-#include "bitmapsLarge.h"
+#include "background.h"
 
 // DS3231 Clock
 DS3231 Clock;
@@ -49,7 +49,7 @@ boolean sensorError = false;
 #define AIO_SERVER      "io.adafruit.com"
 #define AIO_SERVERPORT  1883                   // use 8883 for SSL
 #define AIO_USERNAME    "username"
-#define AIO_KEY         "adafruitApiKey"
+#define AIO_KEY         "AdafruitApiKey"
 
 WiFiClient client;
 Adafruit_MQTT_Client mqtt(&client, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO_KEY);
@@ -57,13 +57,17 @@ Adafruit_MQTT_Publish temperature = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/
 Adafruit_MQTT_Publish humidity = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/humidity");
 void MQTT_connect();
 
-int button = 2;    // D4
-int switchState = 0; // actual read value from pin4
-int oldSwitchState = 0; // last read value from pin4
-bool showMainDisplay = true;
+int ipButton = 2;    // D4
+int resetButton = 10;    // D0
+static int ipSwitchState = 0;
+static int ipOldSwitchState = 0;
+static int resetSwitchState = 0;
+static int resetOldSwitchState = 0;
+static bool showMainDisplay = true;
 bool isBgPainted;
 
 ESP8266WebServer server(80);
+WiFiManager wifiManager;
 
 void handleRoot() {
   // Sending sample message if you try to open configured IP Address
@@ -73,25 +77,14 @@ void handleRoot() {
 void setup(void) {
   Serial.begin(9600);
   Wire.begin();
-  pinMode(button, INPUT);
+  pinMode(ipButton, INPUT);
+  pinMode(resetButton, INPUT);
+  digitalWrite(resetButton, LOW);
 
   // LCD
-  tft.initR(INITR_BLACKTAB);
-  tft.fillScreen(ST7735_BLACK);
-  tft.setTextColor(ST7735_WHITE);
-  tft.setTextSize(1);
-  tft.setCursor(25, 20);
-  tft.print("Weather Station");
-  tft.setCursor(50, 60);
-  tft.print("Open");
-  tft.setCursor(10, 100);
-  tft.print("192.168.4.1");
-  tft.setCursor(20, 130);
-  tft.print("Connect To WiFi");
+  getInitDisplayData();
   pinMode(BUILTIN_LED, OUTPUT);
   ticker.attach(0.6, tick);
-  WiFiManager wifiManager;
-  // wifiManager.resetSettings();
   wifiManager.setAPCallback(configModeCallback);
   if (!wifiManager.autoConnect("Weather Station")) {
     Serial.println("failed to connect and hit timeout");
@@ -206,46 +199,52 @@ void loop() {
   else {
     dhtData = String(c) + ' ' + String(f) + ' ' + String(h);
   }
-  
-  switchState = digitalRead(button); // read the pushButton State
-  if (switchState != oldSwitchState) // catch change
-  {
-    oldSwitchState = switchState;
-    if (switchState == HIGH)
-    {
-      showMainDisplay = !showMainDisplay;
-    }
-  }
-  if (showMainDisplay)
-  {
-    if(!isBgPainted) {
-      tft.fillScreen(ST7735_WHITE);
-      tft.setTextSize(2);
-      showBgImg();
+
+  handleSwitch();
+
+  if (showMainDisplay) {
+    if (!isBgPainted) {
+      ESP.reset();
     }
     else {
-      isBgPainted=true;
+      isBgPainted = true;
       showDataToDisplay();
     }
   } else {
     showIpAddress();
   }
-  
-  // MQTT
-  MQTT_connect();
-  Serial.print(F("\nSending Data... "));
-  if (!temperature.publish(c)) {
-    Serial.println(F("Failed"));
-  } else {
-    Serial.println(F("Sent"));
-  }
-  if (!humidity.publish(h)) {
-    Serial.println(F("Failed"));
-  } else {
-    Serial.println(F("Sent"));
-  }
 
+  handleMQTT();
   delay(5000);
+}
+
+void getInitDisplayData() {
+  tft.initR(INITR_BLACKTAB);
+  tft.fillScreen(ST7735_BLACK);
+  tft.setTextColor(ST7735_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(20, 10);
+  tft.print("Weather Station");
+  tft.setCursor(60, 30);
+  tft.print("By");
+  tft.setCursor(30, 50);
+  tft.print("Narayan Vyas");
+  tft.setCursor(52, 80);
+  tft.print("Open");
+  tft.setCursor(8, 95);
+  tft.print("http://192.168.4.1/");
+  tft.setCursor(23, 110);
+  tft.print("And Enter WiFi");
+  tft.setCursor(30, 125);
+  tft.print("Credentials");
+  tft.setCursor(1, 145);
+  tft.print("Connecting To WiFi");
+  delay(500);
+  tft.print(".");
+  delay(500);
+  tft.print(".");
+  delay(500);
+  tft.print(".");
 }
 
 void showBgImg() {
@@ -253,7 +252,7 @@ void showBgImg() {
   ESP.wdtDisable();
   for (row = 0; row < hg; row++) { // For each scanline...
     for (col = 0; col < wd; col++) { // For each pixel...
-      tft.drawPixel(col, row, pgm_read_word(evive_in_hand + buffidx));
+      tft.drawPixel(col, row, pgm_read_word(bgImg + buffidx));
       buffidx++;
     } // end pixel
   }
@@ -266,8 +265,43 @@ void showIpAddress() {
   tft.fillScreen(ST7735_BLACK);
   tft.setTextColor(ST7735_WHITE);
   tft.setTextSize(1);
-  tft.setCursor(10, 70);
+  tft.setCursor(35, 70);
+  tft.print("IP Address");
+  tft.setCursor(27, 90);
   tft.print(WiFi.localIP());
+}
+
+void handleSwitch() {
+  ipSwitchState = digitalRead(ipButton);
+  resetSwitchState = digitalRead(resetButton);
+  if (ipSwitchState != ipOldSwitchState) {
+    ipOldSwitchState = ipSwitchState;
+    if (ipSwitchState == HIGH) {
+      showMainDisplay = !showMainDisplay;
+    }
+  }
+  if (resetSwitchState != resetOldSwitchState) {
+    resetOldSwitchState = resetSwitchState;
+    if (resetSwitchState == HIGH) {
+      Serial.println("here");
+      tft.fillScreen(ST7735_BLACK);
+      tft.setTextColor(ST7735_WHITE);
+      tft.setTextSize(1);
+      tft.setCursor(8, 75);
+      tft.print("Resetting Device");
+      delay(500);
+      tft.print(".");
+      delay(500);
+      tft.print(".");
+      delay(500);
+      tft.print(".");
+      delay(2000);
+      Serial.println("here");
+      WiFi.disconnect();
+      delay(1000);
+      ESP.reset();
+    }
+  }
 }
 
 void showDataToDisplay() {
@@ -306,6 +340,21 @@ void showDataToDisplay() {
   tft.print(h);
   tft.print(" %");
   tft.setTextColor(ST7735_BLACK);
+}
+
+void handleMQTT() {
+  MQTT_connect();
+  Serial.print(F("\nSending Data... "));
+  if (!temperature.publish(c)) {
+    Serial.println(F("Failed"));
+  } else {
+    Serial.println(F("Sent"));
+  }
+  if (!humidity.publish(h)) {
+    Serial.println(F("Failed"));
+  } else {
+    Serial.println(F("Sent"));
+  }
 }
 
 void configModeCallback (WiFiManager *myWiFiManager) {
